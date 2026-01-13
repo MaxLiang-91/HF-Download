@@ -18,6 +18,10 @@ jobs:
     - name: 构建 APK
       working-directory: mobile
       run: |
+        # 设置环境变量跳过 root 检查
+        export BUILDOZER_WARN_ON_ROOT=0
+        
+        # 运行构建
         buildozer android debug
     
     - name: 上传 APK
