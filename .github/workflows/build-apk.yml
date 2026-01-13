@@ -50,9 +50,15 @@ jobs:
     - name: 构建 APK
       working-directory: mobile
       run: |
-        buildozer android debug
+        # 修改 buildozer.spec 以自动接受许可证
+        echo "" >> buildozer.spec
+        echo "# 自动接受 Android SDK 许可证" >> buildozer.spec
+        echo "android.accept_sdk_license = True" >> buildozer.spec
+        
+        # 运行构建
+        buildozer -v android debug
       env:
-        USE_SDK_WRAPPER: 1
+        CI: "true"
         GRADLE_OPTS: "-Xmx2048m -Dorg.gradle.jvmargs=-Xmx2048m"
     
     - name: 上传 APK
