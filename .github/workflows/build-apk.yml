@@ -93,32 +93,19 @@ jobs:
         # 备份原始文件
         cp buildozer.spec buildozer.spec.backup
         
-        # 使用 Python 脚本更新配置
-        python3 -c "
-import re
-
-with open('buildozer.spec', 'r') as f:
-    content = f.read()
-
-# 使用较旧的 SDK 版本避免许可证问题
-content = re.sub(r'^android\.api = .*', 'android.api = 30', content, flags=re.MULTILINE)
-
-# 使用较旧的 build-tools 版本
-if 'android.build_tools_version' not in content:
-    content += '\nandroid.build_tools_version = 30.0.3\n'
-else:
-    content = re.sub(r'^android\.build_tools_version = .*', 'android.build_tools_version = 30.0.3', content, flags=re.MULTILINE)
-
-# 使用较旧的 NDK 版本
-content = re.sub(r'^android\.ndk = .*', 'android.ndk = 25c', content, flags=re.MULTILINE)
-
-# 添加许可证接受标志
-if 'android.accept_sdk_license' not in content:
-    content += '\n# 自动接受 SDK 许可证\nandroid.accept_sdk_license = True\n'
-
-with open('buildozer.spec', 'w') as f:
-    f.write(content)
-"
+        # 使用 sed 更新配置
+        sed -i 's/^android.api = .*/android.api = 30/' buildozer.spec
+        sed -i 's/^android.ndk = .*/android.ndk = 25c/' buildozer.spec
+        
+        # 添加 build_tools_version（如果不存在）
+        if ! grep -q "android.build_tools_version" buildozer.spec; then
+          echo "android.build_tools_version = 30.0.3" >> buildozer.spec
+        fi
+        
+        # 添加许可证接受标志（如果不存在）
+        if ! grep -q "android.accept_sdk_license" buildozer.spec; then
+          echo "android.accept_sdk_license = True" >> buildozer.spec
+        fi
         
         echo "更新后的 buildozer.spec 配置:"
         grep -E "^(title|package.name|version|android.api|android.build_tools|android.ndk|requirements|android.accept)" buildozer.spec || true
