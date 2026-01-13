@@ -36,9 +36,6 @@ android.api = 35
 # 最低 API 级别（支持 Android 5.0+）
 android.minapi = 21
 
-# Android SDK 版本
-android.sdk = 35
-
 # Android NDK 版本
 android.ndk = 25b
 
