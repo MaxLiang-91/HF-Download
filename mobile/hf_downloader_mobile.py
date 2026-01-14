@@ -226,10 +226,7 @@ class HFDownloaderApp(App):
         self.downloader = HFDownloader()
         self.download_thread = None
         self.is_downloading = False
-        
-        # 初始化保持屏幕常亮和防止后台杀死
-        self.acquire_wake_lock()
-        self.keep_screen_on()
+        self.log_label = None  # 先初始化为 None
         
         # 主布局
         layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
@@ -327,7 +324,15 @@ class HFDownloaderApp(App):
         log_layout.add_widget(self.log_scroll)
         layout.add_widget(log_layout)
         
+        # 初始化保持屏幕常亮和防止后台杀死（在 UI 创建完成后）
+        Clock.schedule_once(lambda dt: self.init_android_features(), 0.5)
+        
         return layout
+    
+    def init_android_features(self):
+        """初始化 Android 特性（延迟执行，确保 UI 已创建）"""
+        self.acquire_wake_lock()
+        self.keep_screen_on()
     
     def acquire_wake_lock(self):
         """获取唤醒锁，防止CPU睡眠和后台杀死（兼容 ColorOS 15）"""
@@ -400,6 +405,8 @@ class HFDownloaderApp(App):
     
     def log_message(self, message):
         """添加日志"""
+        if self.log_label is None:
+            return  # UI 未创建时忽略日志
         current = self.log_label.text
         self.log_label.text = f"{current}\n{message}" if current else message
         self.log_scroll.scroll_y = 0
