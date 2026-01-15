@@ -25,6 +25,8 @@ import os
 import requests
 import threading
 import re
+import json
+import time
 from urllib.parse import urlparse, unquote
 from functools import partial
 
@@ -129,21 +131,29 @@ class HFDownloader:
         return f"{size:.2f} PB"
     
     def download_file(self, url, save_path, progress_callback=None, status_callback=None):
-        """下载文件，支持断点续传"""
+        """下载文件，支持断点续传，网络异常安全处理"""
         self.cancel_flag = False
         self.pause_flag = False
         
-        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        except Exception as e:
+            if status_callback:
+                Clock.schedule_once(lambda dt: status_callback(f"Path error: {e}"), 0)
+            return False
         
         downloaded_size = 0
         if os.path.exists(save_path):
             downloaded_size = os.path.getsize(save_path)
         
-        total_size = self.get_file_size(url)
+        try:
+            total_size = self.get_file_size(url)
+        except:
+            total_size = 0
         
-        if downloaded_size > 0 and downloaded_size == total_size:
+        if downloaded_size > 0 and total_size > 0 and downloaded_size == total_size:
             if status_callback:
-                Clock.schedule_once(lambda dt: status_callback("文件已存在"), 0)
+                Clock.schedule_once(lambda dt: status_callback("File exists"), 0)
             if progress_callback:
                 Clock.schedule_once(lambda dt: progress_callback(100.0, total_size, total_size), 0)
             return True
@@ -152,50 +162,74 @@ class HFDownloader:
         if downloaded_size > 0:
             headers['Range'] = f'bytes={downloaded_size}-'
             if status_callback:
-                Clock.schedule_once(lambda dt: status_callback("继续下载..."), 0)
+                Clock.schedule_once(lambda dt: status_callback("Resuming..."), 0)
         
-        try:
-            response = self.session.get(url, headers=headers, stream=True, timeout=30)
-            
-            if downloaded_size > 0 and response.status_code != 206:
-                downloaded_size = 0
-                response = self.session.get(url, stream=True, timeout=30)
-            
-            if response.status_code not in [200, 206]:
-                if status_callback:
-                    Clock.schedule_once(lambda dt: status_callback(f"下载失败: {response.status_code}"), 0)
-                return False
-            
-            mode = 'ab' if downloaded_size > 0 else 'wb'
-            chunk_size = 8192
-            
-            with open(save_path, mode) as f:
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    while self.pause_flag and not self.cancel_flag:
-                        pass
-                    
-                    if self.cancel_flag:
-                        if status_callback:
-                            Clock.schedule_once(lambda dt: status_callback("下载已取消"), 0)
-                        return False
-                    
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                response = self.session.get(url, headers=headers, stream=True, timeout=60)
+                
+                if downloaded_size > 0 and response.status_code != 206:
+                    downloaded_size = 0
+                    response = self.session.get(url, stream=True, timeout=60)
+                
+                if response.status_code not in [200, 206]:
+                    if status_callback:
+                        Clock.schedule_once(lambda dt: status_callback(f"HTTP {response.status_code}"), 0)
+                    return False
+                
+                mode = 'ab' if downloaded_size > 0 else 'wb'
+                chunk_size = 8192
+                
+                with open(save_path, mode) as f:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        # 暂停处理
+                        while self.pause_flag and not self.cancel_flag:
+                            time.sleep(0.1)
                         
-                        if progress_callback and total_size > 0:
-                            percentage = (downloaded_size / total_size * 100)
-                            Clock.schedule_once(lambda dt, p=percentage, d=downloaded_size, t=total_size: 
-                                              progress_callback(p, d, t), 0)
-            
-            if status_callback:
-                Clock.schedule_once(lambda dt: status_callback("下载完成！"), 0)
-            return True
-            
-        except Exception as e:
-            if status_callback:
-                Clock.schedule_once(lambda dt: status_callback(f"错误: {str(e)}"), 0)
-            return False
+                        if self.cancel_flag:
+                            if status_callback:
+                                Clock.schedule_once(lambda dt: status_callback("Cancelled"), 0)
+                            return False
+                        
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+                            
+                            if progress_callback and total_size > 0:
+                                percentage = (downloaded_size / total_size * 100)
+                                Clock.schedule_once(lambda dt, p=percentage, d=downloaded_size, t=total_size: 
+                                                  progress_callback(p, d, t), 0)
+                
+                if status_callback:
+                    Clock.schedule_once(lambda dt: status_callback("Done!"), 0)
+                return True
+                
+            except (requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                retry_count += 1
+                if retry_count < max_retries:
+                    if status_callback:
+                        Clock.schedule_once(lambda dt, r=retry_count: 
+                            status_callback(f"Network error, retry {r}/{max_retries}..."), 0)
+                    time.sleep(2)  # 等待2秒后重试
+                    # 重新获取已下载大小
+                    if os.path.exists(save_path):
+                        downloaded_size = os.path.getsize(save_path)
+                        headers['Range'] = f'bytes={downloaded_size}-'
+                else:
+                    if status_callback:
+                        Clock.schedule_once(lambda dt: status_callback("Network failed"), 0)
+                    return False
+            except Exception as e:
+                if status_callback:
+                    Clock.schedule_once(lambda dt: status_callback(f"Error: {str(e)[:30]}"), 0)
+                return False
+        
+        return False
     
     def get_repo_files(self, username, model, branch='main', subpath=''):
         """获取仓库文件列表"""
@@ -230,12 +264,15 @@ class HFDownloaderApp(App):
         super().__init__(**kwargs)
         self.wake_lock = None
         self.window_flags_set = False
-        self.file_checkboxes = []  # 文件选择复选框
-        self.files_data = []  # 文件列表数据
-        self.file_selection_popup = None  # 文件选择弹窗
-        self.is_paused = False  # 暂停状态
-        self.notification_id = 1001  # 通知ID
-        self.channel_id = 'hf_download_channel'  # 通知通道ID
+        self.file_checkboxes = []
+        self.files_data = []
+        self.file_selection_popup = None
+        self.is_paused = False
+        self.notification_id = 1001
+        self.channel_id = 'hf_download_channel'
+        self.state_file = None  # 状态保存文件路径
+        self.pending_files = []  # 待下载文件列表
+        self.current_save_dir = ''
     
     def build(self):
         self.title = 'HF下载工具'
@@ -361,7 +398,79 @@ class HFDownloaderApp(App):
     def init_android_features(self):
         """初始化 Android 特性"""
         self.acquire_wake_lock()
-        self.log_message('Ready to download')
+        self.init_state_file()
+        self.check_pending_downloads()
+        self.log_message('Ready')
+    
+    def init_state_file(self):
+        """初始化状态文件路径"""
+        try:
+            save_dir = self.path_input.text.strip()
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+                self.state_file = os.path.join(save_dir, '.hf_download_state.json')
+        except:
+            pass
+    
+    def save_download_state(self, files, save_dir):
+        """保存下载状态"""
+        if not self.state_file:
+            return
+        try:
+            state = {
+                'files': files,
+                'save_dir': save_dir,
+                'url': self.url_input.text.strip()
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f)
+        except:
+            pass
+    
+    def load_download_state(self):
+        """加载下载状态"""
+        if not self.state_file or not os.path.exists(self.state_file):
+            return None
+        try:
+            with open(self.state_file, 'r') as f:
+                return json.load(f)
+        except:
+            return None
+    
+    def clear_download_state(self):
+        """清除下载状态"""
+        if self.state_file and os.path.exists(self.state_file):
+            try:
+                os.remove(self.state_file)
+            except:
+                pass
+    
+    def check_pending_downloads(self):
+        """检查是否有未完成的下载"""
+        state = self.load_download_state()
+        if state and state.get('files'):
+            files = state['files']
+            save_dir = state.get('save_dir', '')
+            url = state.get('url', '')
+            
+            # 检查哪些文件未完成
+            pending = []
+            for f in files:
+                path, file_url, size = f
+                save_path = os.path.join(save_dir, path)
+                if os.path.exists(save_path):
+                    if os.path.getsize(save_path) < size:
+                        pending.append(f)  # 未完成
+                else:
+                    pending.append(f)  # 未开始
+            
+            if pending:
+                self.pending_files = pending
+                self.current_save_dir = save_dir
+                if url:
+                    self.url_input.text = url
+                self.log_message(f'Found {len(pending)} pending files')
+                self.log_message('Click Start to resume')
     
     def create_notification_channel(self):
         """创建通知通道"""
@@ -514,6 +623,25 @@ class HFDownloaderApp(App):
     
     def start_download(self, instance):
         """开始下载"""
+        # 检查是否有未完成的下载
+        if self.pending_files and self.current_save_dir:
+            self.log_message(f'\nResuming {len(self.pending_files)} files...')
+            self.download_btn.disabled = True
+            self.cancel_btn.disabled = False
+            self.pause_btn.disabled = False
+            self.is_downloading = True
+            self.is_paused = False
+            self.downloader.pause_flag = False
+            
+            files_to_download = self.pending_files
+            save_dir = self.current_save_dir
+            self.pending_files = []  # 清空待下载列表
+            
+            thread = threading.Thread(target=self._download_selected_files, 
+                                      args=(files_to_download, save_dir), daemon=True)
+            thread.start()
+            return
+        
         url = self.url_input.text.strip()
         save_dir = self.path_input.text.strip()
         
@@ -524,6 +652,9 @@ class HFDownloaderApp(App):
         if not save_dir:
             self.show_popup('Warning', 'Please enter save path')
             return
+        
+        # 初始化状态文件路径
+        self.init_state_file()
         
         download_url, filename, is_directory, repo_info = self.downloader.parse_hf_url(url)
         
@@ -549,15 +680,12 @@ class HFDownloaderApp(App):
         if is_directory:
             self.log_message('Batch mode: Getting file list...')
             self.log_message(f"Model: {repo_info['username']}/{repo_info['model']}")
-            # 先获取文件列表，显示选择界面
             thread = threading.Thread(target=self._fetch_files_and_show_selection, 
                                        args=(repo_info, save_dir), daemon=True)
             thread.start()
         else:
             save_path = os.path.join(save_dir, filename)
             self.log_message(f'Downloading: {filename}')
-            # 显示下载通知
-            self.show_download_notification('HF Download', filename, 0)
             thread = threading.Thread(target=self._single_download, args=(download_url, save_path), daemon=True)
             thread.start()
     
@@ -692,6 +820,9 @@ class HFDownloaderApp(App):
         if self.file_selection_popup:
             self.file_selection_popup.dismiss()
         
+        # 保存下载状态
+        self.save_download_state(selected_files, self.current_save_dir)
+        
         self.log_message(f'\nDownloading {len(selected_files)} files...')
         
         self.download_btn.disabled = True
@@ -700,9 +831,6 @@ class HFDownloaderApp(App):
         self.is_downloading = True
         self.is_paused = False
         self.downloader.pause_flag = False
-        
-        # 显示下载通知
-        self.show_download_notification('HF Download', f'Starting {len(selected_files)} files...', 0)
         
         thread = threading.Thread(target=self._download_selected_files, 
                                   args=(selected_files, self.current_save_dir), daemon=True)
@@ -716,8 +844,12 @@ class HFDownloaderApp(App):
                 break
             
             filename = os.path.basename(path)
-            save_path = os.path.join(save_dir, path)
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            try:
+                save_path = os.path.join(save_dir, path)
+                os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else save_dir, exist_ok=True)
+            except Exception as e:
+                Clock.schedule_once(lambda dt: self.log_message(f'Path error: {e}'), 0)
+                continue
             
             # 检查是否有旧文件（断点续传）
             existing_size = 0
@@ -727,17 +859,13 @@ class HFDownloaderApp(App):
             if existing_size > 0 and existing_size < size:
                 Clock.schedule_once(lambda dt, p=path, e=existing_size, s=size, idx=i, t=total: 
                     self.log_message(f'\n[{idx}/{t}] {os.path.basename(p)}\n  -> RESUME: {self.downloader.format_size(e)}/{self.downloader.format_size(s)}'), 0)
-            elif existing_size == size:
+            elif existing_size >= size and size > 0:
                 Clock.schedule_once(lambda dt, p=path, idx=i, t=total: 
-                    self.log_message(f'\n[{idx}/{t}] {os.path.basename(p)} (exists, skip)'), 0)
+                    self.log_message(f'\n[{idx}/{t}] {os.path.basename(p)} (done)'), 0)
                 continue
             else:
                 Clock.schedule_once(lambda dt, p=path, idx=i, t=total: 
                     self.log_message(f'\n[{idx}/{t}] {os.path.basename(p)}'), 0)
-            
-            # 更新通知
-            Clock.schedule_once(lambda dt, idx=i, t=total, f=filename: 
-                self.show_download_notification('HF Download', f'[{idx}/{t}] {f}', 0), 0)
             
             self.downloader.download_file(
                 url, save_path,
@@ -745,6 +873,8 @@ class HFDownloaderApp(App):
                 status_callback=self.log_message
             )
         
+        # 下载完成，清除状态
+        Clock.schedule_once(lambda dt: self.clear_download_state(), 0)
         Clock.schedule_once(lambda dt: self._download_finished(True), 0)
 
     def _single_download(self, url, save_path):
