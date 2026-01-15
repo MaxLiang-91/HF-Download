@@ -398,8 +398,6 @@ class HFDownloaderApp(App):
     def init_android_features(self):
         """初始化 Android 特性"""
         self.acquire_wake_lock()
-        self.init_state_file()
-        self.check_pending_downloads()
         self.log_message('Ready')
     
     def init_state_file(self):
@@ -634,25 +632,6 @@ class HFDownloaderApp(App):
     def start_download(self, instance):
         """开始下载"""
         try:
-            # 检查是否有未完成的下载
-            if self.pending_files and self.current_save_dir:
-                self.log_message(f'\nResuming {len(self.pending_files)} files...')
-                self.download_btn.disabled = True
-                self.cancel_btn.disabled = False
-                self.pause_btn.disabled = False
-                self.is_downloading = True
-                self.is_paused = False
-                self.downloader.pause_flag = False
-                
-                files_to_download = self.pending_files
-                save_dir = self.current_save_dir
-                self.pending_files = []
-                
-                thread = threading.Thread(target=self._download_selected_files, 
-                                          args=(files_to_download, save_dir), daemon=True)
-                thread.start()
-                return
-            
             url = self.url_input.text.strip() if self.url_input else ''
             save_dir = self.path_input.text.strip() if self.path_input else ''
             
@@ -664,9 +643,11 @@ class HFDownloaderApp(App):
                 self.show_popup('Warning', 'Please enter save path')
                 return
             
-            self.init_state_file()
-            
-            download_url, filename, is_directory, repo_info = self.downloader.parse_hf_url(url)
+            try:
+                download_url, filename, is_directory, repo_info = self.downloader.parse_hf_url(url)
+            except Exception as e:
+                self.log_message(f'URL parse error: {e}')
+                return
             
             if is_directory and not self.batch_mode:
                 self.show_popup('Info', 'Directory URL, switch to Batch mode')
@@ -689,17 +670,21 @@ class HFDownloaderApp(App):
             
             if is_directory:
                 self.log_message('Batch mode: Getting file list...')
-                self.log_message(f"Model: {repo_info['username']}/{repo_info['model']}")
+                if repo_info:
+                    self.log_message(f"Model: {repo_info.get('username', '')}/{repo_info.get('model', '')}")
                 thread = threading.Thread(target=self._fetch_files_and_show_selection, 
                                            args=(repo_info, save_dir), daemon=True)
                 thread.start()
             else:
-                save_path = os.path.join(save_dir, filename)
+                try:
+                    save_path = os.path.join(save_dir, filename) if filename else save_dir
+                except:
+                    save_path = save_dir
                 self.log_message(f'Downloading: {filename}')
                 thread = threading.Thread(target=self._single_download, args=(download_url, save_path), daemon=True)
                 thread.start()
         except Exception as e:
-            self.log_message(f'Error: {str(e)[:30]}')
+            self.log_message(f'Error: {str(e)[:50]}')
             self.download_btn.disabled = False
     
     def _fetch_files_and_show_selection(self, repo_info, save_dir):
@@ -827,31 +812,30 @@ class HFDownloaderApp(App):
     
     def _start_selected_download(self, instance):
         """开始下载选中的文件"""
-        selected_files = [(path, url, size) for cb, path, url, size in self.file_checkboxes if cb.active]
-        
-        if not selected_files:
-            self.show_popup('Notice', 'Please select at least one file')
-            return
-        
-        # 关闭选择弹窗
-        if self.file_selection_popup:
-            self.file_selection_popup.dismiss()
-        
-        # 保存下载状态
-        self.save_download_state(selected_files, self.current_save_dir)
-        
-        self.log_message(f'\nDownloading {len(selected_files)} files...')
-        
-        self.download_btn.disabled = True
-        self.cancel_btn.disabled = False
-        self.pause_btn.disabled = False
-        self.is_downloading = True
-        self.is_paused = False
-        self.downloader.pause_flag = False
-        
-        thread = threading.Thread(target=self._download_selected_files, 
-                                  args=(selected_files, self.current_save_dir), daemon=True)
-        thread.start()
+        try:
+            selected_files = [(path, url, size) for cb, path, url, size in self.file_checkboxes if cb.active]
+            
+            if not selected_files:
+                self.show_popup('Notice', 'Please select at least one file')
+                return
+            
+            if self.file_selection_popup:
+                self.file_selection_popup.dismiss()
+            
+            self.log_message(f'\nDownloading {len(selected_files)} files...')
+            
+            self.download_btn.disabled = True
+            self.cancel_btn.disabled = False
+            self.pause_btn.disabled = False
+            self.is_downloading = True
+            self.is_paused = False
+            self.downloader.pause_flag = False
+            
+            thread = threading.Thread(target=self._download_selected_files, 
+                                      args=(selected_files, self.current_save_dir), daemon=True)
+            thread.start()
+        except Exception as e:
+            self.log_message(f'Error: {str(e)[:30]}')
     
     def _download_selected_files(self, files, save_dir):
         """下载选中的文件"""
@@ -890,8 +874,7 @@ class HFDownloaderApp(App):
                 status_callback=self.log_message
             )
         
-        # 下载完成，清除状态
-        Clock.schedule_once(lambda dt: self.clear_download_state(), 0)
+        # 下载完成
         Clock.schedule_once(lambda dt: self._download_finished(True), 0)
 
     def _single_download(self, url, save_path):
