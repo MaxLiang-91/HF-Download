@@ -405,12 +405,12 @@ class HFDownloaderApp(App):
     def init_state_file(self):
         """初始化状态文件路径"""
         try:
-            save_dir = self.path_input.text.strip()
+            save_dir = self.path_input.text.strip() if self.path_input else ''
             if save_dir:
                 os.makedirs(save_dir, exist_ok=True)
                 self.state_file = os.path.join(save_dir, '.hf_download_state.json')
-        except:
-            pass
+        except Exception:
+            self.state_file = None
     
     def save_download_state(self, files, save_dir):
         """保存下载状态"""
@@ -420,57 +420,67 @@ class HFDownloaderApp(App):
             state = {
                 'files': files,
                 'save_dir': save_dir,
-                'url': self.url_input.text.strip()
+                'url': self.url_input.text.strip() if self.url_input else ''
             }
-            with open(self.state_file, 'w') as f:
+            with open(self.state_file, 'w', encoding='utf-8') as f:
                 json.dump(state, f)
-        except:
+        except Exception:
             pass
     
     def load_download_state(self):
         """加载下载状态"""
-        if not self.state_file or not os.path.exists(self.state_file):
-            return None
         try:
-            with open(self.state_file, 'r') as f:
+            if not self.state_file or not os.path.exists(self.state_file):
+                return None
+            with open(self.state_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
+        except Exception:
             return None
     
     def clear_download_state(self):
         """清除下载状态"""
-        if self.state_file and os.path.exists(self.state_file):
-            try:
+        try:
+            if self.state_file and os.path.exists(self.state_file):
                 os.remove(self.state_file)
-            except:
-                pass
+        except Exception:
+            pass
     
     def check_pending_downloads(self):
         """检查是否有未完成的下载"""
-        state = self.load_download_state()
-        if state and state.get('files'):
+        try:
+            state = self.load_download_state()
+            if not state or not state.get('files'):
+                return
+            
             files = state['files']
             save_dir = state.get('save_dir', '')
             url = state.get('url', '')
             
-            # 检查哪些文件未完成
+            if not save_dir:
+                return
+            
             pending = []
             for f in files:
-                path, file_url, size = f
-                save_path = os.path.join(save_dir, path)
-                if os.path.exists(save_path):
-                    if os.path.getsize(save_path) < size:
-                        pending.append(f)  # 未完成
-                else:
-                    pending.append(f)  # 未开始
+                try:
+                    path, file_url, size = f
+                    save_path = os.path.join(save_dir, path)
+                    if os.path.exists(save_path):
+                        if os.path.getsize(save_path) < size:
+                            pending.append(f)
+                    else:
+                        pending.append(f)
+                except Exception:
+                    continue
             
             if pending:
                 self.pending_files = pending
                 self.current_save_dir = save_dir
-                if url:
+                if url and self.url_input:
                     self.url_input.text = url
-                self.log_message(f'Found {len(pending)} pending files')
+                self.log_message(f'Found {len(pending)} pending')
                 self.log_message('Click Start to resume')
+        except Exception:
+            pass
     
     def create_notification_channel(self):
         """创建通知通道"""
@@ -623,9 +633,53 @@ class HFDownloaderApp(App):
     
     def start_download(self, instance):
         """开始下载"""
-        # 检查是否有未完成的下载
-        if self.pending_files and self.current_save_dir:
-            self.log_message(f'\nResuming {len(self.pending_files)} files...')
+        try:
+            # 检查是否有未完成的下载
+            if self.pending_files and self.current_save_dir:
+                self.log_message(f'\nResuming {len(self.pending_files)} files...')
+                self.download_btn.disabled = True
+                self.cancel_btn.disabled = False
+                self.pause_btn.disabled = False
+                self.is_downloading = True
+                self.is_paused = False
+                self.downloader.pause_flag = False
+                
+                files_to_download = self.pending_files
+                save_dir = self.current_save_dir
+                self.pending_files = []
+                
+                thread = threading.Thread(target=self._download_selected_files, 
+                                          args=(files_to_download, save_dir), daemon=True)
+                thread.start()
+                return
+            
+            url = self.url_input.text.strip() if self.url_input else ''
+            save_dir = self.path_input.text.strip() if self.path_input else ''
+            
+            if not url:
+                self.show_popup('Warning', 'Please enter URL')
+                return
+            
+            if not save_dir:
+                self.show_popup('Warning', 'Please enter save path')
+                return
+            
+            self.init_state_file()
+            
+            download_url, filename, is_directory, repo_info = self.downloader.parse_hf_url(url)
+            
+            if is_directory and not self.batch_mode:
+                self.show_popup('Info', 'Directory URL, switch to Batch mode')
+                return
+            
+            if not is_directory and self.batch_mode:
+                self.show_popup('Info', 'Single file URL, switch to Single mode')
+                return
+            
+            if not download_url and not is_directory:
+                self.show_popup('Error', 'Cannot parse URL')
+                return
+            
             self.download_btn.disabled = True
             self.cancel_btn.disabled = False
             self.pause_btn.disabled = False
@@ -633,79 +687,42 @@ class HFDownloaderApp(App):
             self.is_paused = False
             self.downloader.pause_flag = False
             
-            files_to_download = self.pending_files
-            save_dir = self.current_save_dir
-            self.pending_files = []  # 清空待下载列表
-            
-            thread = threading.Thread(target=self._download_selected_files, 
-                                      args=(files_to_download, save_dir), daemon=True)
-            thread.start()
-            return
-        
-        url = self.url_input.text.strip()
-        save_dir = self.path_input.text.strip()
-        
-        if not url:
-            self.show_popup('Warning', 'Please enter URL')
-            return
-        
-        if not save_dir:
-            self.show_popup('Warning', 'Please enter save path')
-            return
-        
-        # 初始化状态文件路径
-        self.init_state_file()
-        
-        download_url, filename, is_directory, repo_info = self.downloader.parse_hf_url(url)
-        
-        if is_directory and not self.batch_mode:
-            self.show_popup('Info', 'Directory URL detected, switch to Batch mode')
-            return
-        
-        if not is_directory and self.batch_mode:
-            self.show_popup('Info', 'Single file URL, switch to Single mode')
-            return
-        
-        if not download_url and not is_directory:
-            self.show_popup('Error', 'Cannot parse URL')
-            return
-        
-        self.download_btn.disabled = True
-        self.cancel_btn.disabled = False
-        self.pause_btn.disabled = False
-        self.is_downloading = True
-        self.is_paused = False
-        self.downloader.pause_flag = False
-        
-        if is_directory:
-            self.log_message('Batch mode: Getting file list...')
-            self.log_message(f"Model: {repo_info['username']}/{repo_info['model']}")
-            thread = threading.Thread(target=self._fetch_files_and_show_selection, 
-                                       args=(repo_info, save_dir), daemon=True)
-            thread.start()
-        else:
-            save_path = os.path.join(save_dir, filename)
-            self.log_message(f'Downloading: {filename}')
-            thread = threading.Thread(target=self._single_download, args=(download_url, save_path), daemon=True)
-            thread.start()
+            if is_directory:
+                self.log_message('Batch mode: Getting file list...')
+                self.log_message(f"Model: {repo_info['username']}/{repo_info['model']}")
+                thread = threading.Thread(target=self._fetch_files_and_show_selection, 
+                                           args=(repo_info, save_dir), daemon=True)
+                thread.start()
+            else:
+                save_path = os.path.join(save_dir, filename)
+                self.log_message(f'Downloading: {filename}')
+                thread = threading.Thread(target=self._single_download, args=(download_url, save_path), daemon=True)
+                thread.start()
+        except Exception as e:
+            self.log_message(f'Error: {str(e)[:30]}')
+            self.download_btn.disabled = False
     
     def _fetch_files_and_show_selection(self, repo_info, save_dir):
         """获取文件列表并显示选择界面"""
-        files = self.downloader.get_repo_files(
-            repo_info['username'],
-            repo_info['model'],
-            repo_info['branch'],
-            repo_info['subpath']
-        )
-        
-        if not files:
-            Clock.schedule_once(lambda dt: self.log_message('Failed to get file list'), 0)
+        try:
+            files = self.downloader.get_repo_files(
+                repo_info['username'],
+                repo_info['model'],
+                repo_info['branch'],
+                repo_info['subpath']
+            )
+            
+            if not files:
+                Clock.schedule_once(lambda dt: self.log_message('Failed to get file list'), 0)
+                Clock.schedule_once(lambda dt: self._download_finished(False), 0)
+                return
+            
+            self.files_data = files
+            self.current_save_dir = save_dir
+            Clock.schedule_once(lambda dt: self._show_file_selection(files), 0)
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self.log_message(f'Error: {str(e)[:30]}'), 0)
             Clock.schedule_once(lambda dt: self._download_finished(False), 0)
-            return
-        
-        self.files_data = files
-        self.current_save_dir = save_dir
-        Clock.schedule_once(lambda dt: self._show_file_selection(files), 0)
     
     def _show_file_selection(self, files):
         """显示文件选择界面"""
